@@ -1,119 +1,93 @@
 import pandas as pd
 import ast
+import os
+import pickle
+from mlxtend.preprocessing import TransactionEncoder
+
+CACHE_DIR = "cache"
+os.makedirs(CACHE_DIR, exist_ok=True)
 
 def load_dataset(path):
-    """
-    Load transaction dataset.
-    """
     df = pd.read_csv(path)
     df.columns = df.columns.str.strip()
     return df
 
-
 def parse_product_list(value):
-    """
-    Convert string representation ['A','B','C'] into a python list.
-    """
+    # Optimize: Check if it's already a list first
     if isinstance(value, list):
         return value
-
+    if pd.isna(value) or value == '':
+        return []
     try:
         return ast.literal_eval(value)
-    except:
-        # fallback
-        return [v.strip() for v in str(value).split(',')]
-
+    except (ValueError, SyntaxError):
+        # Handle cases where strings might not have quotes
+        return [x.strip() for x in str(value).split(',') if x.strip()]
 
 def clean_data(df):
-    """
-    Fix datatypes, booleans, numerics, lists.
-    """
-
-    # Date → datetime
     df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
-
-    # Product list normalization
     df["Product"] = df["Product"].apply(parse_product_list)
+    
+    # Vectorized boolean conversion
+    df["Discount_Applied"] = df["Discount_Applied"].astype(str).str.lower().isin(["true", "1", "yes"])
+    
+    for col in ["Total_Items", "Total_Cost"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
 
-    # Convert TRUE/FALSE to boolean
-    df["Discount_Applied"] = df["Discount_Applied"].map(
-        lambda x: True if str(x).strip().lower() in ["true", "1", "yes"] else False
-    )
-
-    # Ensure numeric types
-    df["Total_Items"] = pd.to_numeric(df["Total_Items"], errors="coerce")
-    df["Total_Cost"]  = pd.to_numeric(df["Total_Cost"], errors="coerce")
-
-    # Fill categorical missing values
-    for col in [
-        "Customer_Name", "Payment_Method", "City", "Store_Type",
-        "Customer_Category", "Season", "Promotion"
-    ]:
-        df[col] = df[col].fillna("Unknown")
-
-    # Remove empty product rows
-    df = df[df["Product"].apply(lambda x: len(x) > 0)]
-
+    cat_cols = ["Customer_Name", "Payment_Method", "City", "Store_Type", "Customer_Category", "Season", "Promotion"]
+    df[cat_cols] = df[cat_cols].fillna("Unknown")
+    
+    # Drop rows with empty baskets
+    df = df[df["Product"].map(len) > 0]
     return df
-
 
 def create_date_features(df):
-    """
-    Add features useful for seasonality analysis.
-    """
     df["Year"] = df["Date"].dt.year
-    df["Month"] = df["Date"].dt.month
+    df["Month_Name"] = df["Date"].dt.month_name()
     df["Day"] = df["Date"].dt.day
-    df["Weekday"] = df["Date"].dt.weekday
-    df["Hour"] = df["Date"].dt.hour
+    df["Weekday"] = df["Date"].dt.day_name()
     return df
 
+def create_basket_dataset(df):
+    te = TransactionEncoder()
+    basket = df["Product"].tolist()
+    # Sparse=True saves RAM on large datasets, but mlxtend fpgrowth usually needs dense pandas df
+    # We stick to dense for compatibility, but watch RAM usage.
+    encoded = te.fit(basket).transform(basket)
+    return pd.DataFrame(encoded, columns=te.columns_)
 
 def create_basket_dataset(df):
     """
-    Convert to one-hot transaction basket for FP-Growth/Apriori.
+    OPTIMIZED: Uses Sparse Matrix to save memory and speed up processing.
     """
-    from mlxtend.preprocessing import TransactionEncoder
+    
     te = TransactionEncoder()
-
     basket = df["Product"].tolist()
-    encoded = te.fit(basket).transform(basket)
+    
+    # 1. Create Sparse Matrix (boolean) instead of dense array
+    # sparse=True is crucial for performance on large datasets
+    te_ary = te.fit(basket).transform(basket, sparse=True)
+    
+    # 2. Convert to Pandas Sparse DataFrame
+    basket_df = pd.DataFrame.sparse.from_spmatrix(te_ary, columns=te.columns_)
+    
+    return basket_df
 
-    return pd.DataFrame(encoded, columns=te.columns_)
+def full_preprocessing(path, force_reload=False):
+    cache_path = os.path.join(CACHE_DIR, "processed_data_sparse.pkl")
+    
+    if not force_reload and os.path.exists(cache_path):
+        # print("⚡ Loading optimized data from cache...")
+        with open(cache_path, "rb") as f:
+            return pickle.load(f)
 
-
-def create_customer_aggregates(df):
-    """
-    For customer segmentation.
-    """
-    agg = df.groupby("Customer_Name").agg({
-        "Total_Cost": ["sum", "mean"],
-        "Total_Items": ["sum", "mean"],
-        "Discount_Applied": "mean",
-        "Transaction_ID": "count"
-    })
-
-    agg.columns = [
-        "Total_Spend",
-        "Avg_Spend",
-        "Total_Items",
-        "Avg_Items",
-        "Discount_Rate",
-        "Transaction_Count"
-    ]
-
-    return agg.reset_index()
-
-
-def full_preprocessing(path):
-    """
-    Full pipeline: load → clean → enrich → prepare outputs.
-    """
+    # print("⚙️  Processing raw data (this happens once)...")
     df = load_dataset(path)
     df = clean_data(df)
     df = create_date_features(df)
-
     basket_df = create_basket_dataset(df)
-    customer_df = create_customer_aggregates(df)
-
-    return df, basket_df, customer_df
+    
+    with open(cache_path, "wb") as f:
+        pickle.dump((df, basket_df), f)
+        
+    return df, basket_df
