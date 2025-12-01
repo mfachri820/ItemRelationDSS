@@ -11,7 +11,8 @@ st.title("🛒 Retail Decision Support System")
 
 # Sidebar: Controls
 st.sidebar.header("Configuration")
-DATA_PATH = "Dataset/Retail_Transactions_Dataset.csv" 
+# UPDATE: Pointing to the new dataset structure
+DATA_PATH = "Dataset/Assignment-1_Data.csv" 
 
 # 1. Load Data (Cached)
 @st.cache_data 
@@ -24,7 +25,7 @@ def get_data():
 df_full, basket_df_full = get_data()
 
 if df_full is None:
-    st.error(f"Dataset not found at {DATA_PATH}. Please check the path.")
+    st.error(f"Dataset not found at {DATA_PATH}. Please ensure the file exists.")
     st.stop()
 
 # --- PERFORMANCE TUNING ---
@@ -37,7 +38,7 @@ sample_fraction = st.sidebar.slider(
     max_value=100, 
     value=10, 
     step=5,
-    key="sample_slider_v3", # Unique key forces this to reset to 10%
+    key="sample_slider_v3", 
     help="Start small (10%). Only increase if you need more data."
 )
 
@@ -50,7 +51,6 @@ else:
     current_txns = len(basket_df)
 
 # CHANGE 2: The "Magic Switch" for speed
-# Defaults to 2 (Pairs only) which is instant.
 max_len = st.sidebar.slider(
     "Max Combination Length", 
     min_value=2, 
@@ -78,7 +78,9 @@ min_confidence = st.sidebar.slider("Minimum Confidence", 0.0, 1.0, 0.2, 0.05)
 
 with st.expander("📊 Dataset Overview"):
     col1, col2, col3 = st.columns(3)
-    col1.metric("Total Transactions", len(df_full))
+    # UPDATE: Logic for new dataset structure
+    # df_full is now 'Long Format' (Line Items), so unique BillNo = Transactions
+    col1.metric("Unique Invoices", df_full['BillNo'].nunique())
     col2.metric("Analyzed Sample", f"{current_txns} ({sample_fraction}%)")
     col3.metric("Total Products", basket_df.shape[1])
 
