@@ -1,119 +1,80 @@
 import pandas as pd
-import ast
+import os
+import pickle
+
+CACHE_DIR = "cache"
+os.makedirs(CACHE_DIR, exist_ok=True)
 
 def load_dataset(path):
     """
-    Load transaction dataset.
+    Load dataset with specific handling for semicolon delimiters
+    and potential encoding issues.
     """
-    df = pd.read_csv(path)
+    try:
+        # Try default UTF-8
+        df = pd.read_csv(path, sep=';', encoding='utf-8')
+    except UnicodeDecodeError:
+        # Fallback for legacy datasets (often Latin-1)
+        df = pd.read_csv(path, sep=';', encoding='latin-1')
+        
     df.columns = df.columns.str.strip()
     return df
 
-
-def parse_product_list(value):
-    """
-    Convert string representation ['A','B','C'] into a python list.
-    """
-    if isinstance(value, list):
-        return value
-
-    try:
-        return ast.literal_eval(value)
-    except:
-        # fallback
-        return [v.strip() for v in str(value).split(',')]
-
-
 def clean_data(df):
     """
-    Fix datatypes, booleans, numerics, lists.
+    Clean the specific format of the Online Retail dataset.
     """
-
-    # Date → datetime
-    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
-
-    # Product list normalization
-    df["Product"] = df["Product"].apply(parse_product_list)
-
-    # Convert TRUE/FALSE to boolean
-    df["Discount_Applied"] = df["Discount_Applied"].map(
-        lambda x: True if str(x).strip().lower() in ["true", "1", "yes"] else False
-    )
-
-    # Ensure numeric types
-    df["Total_Items"] = pd.to_numeric(df["Total_Items"], errors="coerce")
-    df["Total_Cost"]  = pd.to_numeric(df["Total_Cost"], errors="coerce")
-
-    # Fill categorical missing values
-    for col in [
-        "Customer_Name", "Payment_Method", "City", "Store_Type",
-        "Customer_Category", "Season", "Promotion"
-    ]:
-        df[col] = df[col].fillna("Unknown")
-
-    # Remove empty product rows
-    df = df[df["Product"].apply(lambda x: len(x) > 0)]
-
+    # 1. Parse Dates (Input format: 01.12.2010 08:26)
+    df["Date"] = pd.to_datetime(df["Date"], format="%d.%m.%Y %H:%M", errors="coerce")
+    
+    # 2. Handle Price: Convert "2,55" to 2.55
+    if df["Price"].dtype == object:
+        df["Price"] = df["Price"].astype(str).str.replace(',', '.').astype(float)
+        
+    # 3. Clean Item Names
+    df["Itemname"] = df["Itemname"].astype(str).str.strip()
+    # Remove empty or 'nan' items
+    df = df[~df["Itemname"].str.lower().isin(['nan', 'none', ''])]
+    
+    # 4. Filter Quantities
+    # Remove returns (negative quantity)
+    df["Quantity"] = pd.to_numeric(df["Quantity"], errors="coerce")
+    df = df[df["Quantity"] > 0]
+    
     return df
-
-
-def create_date_features(df):
-    """
-    Add features useful for seasonality analysis.
-    """
-    df["Year"] = df["Date"].dt.year
-    df["Month"] = df["Date"].dt.month
-    df["Day"] = df["Date"].dt.day
-    df["Weekday"] = df["Date"].dt.weekday
-    df["Hour"] = df["Date"].dt.hour
-    return df
-
 
 def create_basket_dataset(df):
     """
-    Convert to one-hot transaction basket for FP-Growth/Apriori.
+    Transforms Long-Format Data (one row per item) -> Sparse Basket Matrix.
     """
     from mlxtend.preprocessing import TransactionEncoder
+    
+    # GROUPING: Consolidate items by BillNo
+    # Result: [['White Heart', 'Lantern'], ['Cream Cup', ...]]
+    transactions = df.groupby('BillNo')['Itemname'].apply(list).tolist()
+    
     te = TransactionEncoder()
+    
+    # Create Sparse Matrix (Memory Efficient)
+    te_ary = te.fit(transactions).transform(transactions, sparse=True)
+    
+    return pd.DataFrame.sparse.from_spmatrix(te_ary, columns=te.columns_)
 
-    basket = df["Product"].tolist()
-    encoded = te.fit(basket).transform(basket)
+def full_preprocessing(path, force_reload=True):
+    # Changed cache name to avoid conflict with previous dataset
+    cache_path = os.path.join(CACHE_DIR, "processed_retail_v2.pkl")
+    
+    if not force_reload and os.path.exists(cache_path):
+        with open(cache_path, "rb") as f:
+            return pickle.load(f)
 
-    return pd.DataFrame(encoded, columns=te.columns_)
-
-
-def create_customer_aggregates(df):
-    """
-    For customer segmentation.
-    """
-    agg = df.groupby("Customer_Name").agg({
-        "Total_Cost": ["sum", "mean"],
-        "Total_Items": ["sum", "mean"],
-        "Discount_Applied": "mean",
-        "Transaction_ID": "count"
-    })
-
-    agg.columns = [
-        "Total_Spend",
-        "Avg_Spend",
-        "Total_Items",
-        "Avg_Items",
-        "Discount_Rate",
-        "Transaction_Count"
-    ]
-
-    return agg.reset_index()
-
-
-def full_preprocessing(path):
-    """
-    Full pipeline: load → clean → enrich → prepare outputs.
-    """
     df = load_dataset(path)
     df = clean_data(df)
-    df = create_date_features(df)
-
+    
+    # Note: df is now the cleaned "Long" format
     basket_df = create_basket_dataset(df)
-    customer_df = create_customer_aggregates(df)
-
-    return df, basket_df, customer_df
+    
+    with open(cache_path, "wb") as f:
+        pickle.dump((df, basket_df), f)
+        
+    return df, basket_df
